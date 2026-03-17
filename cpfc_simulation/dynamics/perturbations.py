@@ -320,7 +320,7 @@ def _eci_to_geodetic(r_eci, epoch_dt):
 # NRLMSISE-00 atmospheric density
 # ---------------------------------------------------------------------------
 
-def get_atmospheric_density(r_eci, epoch_dt, t_since_epoch=0.0):
+def get_atmospheric_density(r_eci, epoch_dt, t_since_epoch=0.0, F107=None, Ap=None):
     """Get atmospheric mass density from NRLMSISE-00.
 
     Parameters
@@ -331,6 +331,10 @@ def get_atmospheric_density(r_eci, epoch_dt, t_since_epoch=0.0):
         Mission epoch (UTC).
     t_since_epoch : float
         Seconds since epoch.
+    F107 : float or None
+        Daily F10.7 solar flux [SFU]. If None, uses F107_NOMINAL from config.
+    Ap : float or None
+        Geomagnetic Ap index. If None, uses AP_NOMINAL from config.
 
     Returns
     -------
@@ -338,6 +342,11 @@ def get_atmospheric_density(r_eci, epoch_dt, t_since_epoch=0.0):
         Total mass density [kg/m^3].
     """
     from nrlmsise00 import msise_model
+
+    if F107 is None:
+        F107 = F107_NOMINAL
+    if Ap is None:
+        Ap = AP_NOMINAL
 
     current_time = epoch_dt + timedelta(seconds=t_since_epoch)
     lat_deg, lon_deg, alt_km = _eci_to_geodetic(r_eci, current_time)
@@ -347,7 +356,7 @@ def get_atmospheric_density(r_eci, epoch_dt, t_since_epoch=0.0):
     alt_km = min(alt_km, 1000.0)
 
     result = msise_model(current_time, alt_km, lat_deg, lon_deg,
-                         F107A_NOMINAL, F107_NOMINAL, AP_NOMINAL)
+                         F107A_NOMINAL, F107, Ap)
 
     # msise_model returns a list of lists; result[0][5] is total mass density [g/cm^3]
     rho_g_cm3 = result[0][5]
