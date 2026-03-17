@@ -141,4 +141,4 @@ The `main.py` orchestrator runs five steps:
 
 ## License
 
-Research use. Contact the author for licensing.
+Research use. Contact Pranay Rishi Nalem for licensing.
