@@ -65,13 +65,15 @@ class CoupledDynamics:
         self.T_exo = T_exo
         self.aero_model = CubeSatAeroModel()
 
-        # Chief always ram-pointing (alpha=0) with panels stowed
-        if Cd_chief is None:
-            self.Cd_chief = Cd_freemolecular(1e-6, speed_ratio, 300.0, T_exo)
+        # Chief CdA: if provided use it, otherwise compute for ram-pointing.
+        # In practice, set CdA_chief to the attractor-averaged CdA so that
+        # differential drag = 0 when both satellites have the same attitude
+        # dynamics. Only panel switching creates a difference.
+        if Cd_chief is not None:
+            self.CdA_chief = Cd_chief  # Cd_chief is actually CdA_chief when provided
         else:
-            self.Cd_chief = Cd_chief
+            self.CdA_chief = Cd_freemolecular(1e-6, speed_ratio, 300.0, T_exo) * A_chief
         self.A_chief = A_chief
-        self.CdA_chief = self.Cd_chief * self.A_chief
 
         # Gravity gradient parameter
         self.gg_coeff = 3.0 * self.n**2 * (IXX - IZZ) / IYY

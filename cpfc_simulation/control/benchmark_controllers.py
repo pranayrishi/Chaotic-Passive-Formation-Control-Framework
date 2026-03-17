@@ -18,7 +18,7 @@ class LPDifferentialDragController:
 
     def __call__(self, t, current_state, target_state, T_orb):
         """Compute optimal drag plate command via LP."""
-        e_y = current_state[2] - target_state[2]
+        e_y = current_state[1] - target_state[1]
         secular_gain = 3*self.kappa / ((1+2*self.c) * self.n**2)
         dfy_req = e_y / (secular_gain * T_orb) if abs(secular_gain * T_orb) > 1e-30 else 0.0
 
@@ -48,7 +48,7 @@ class ConvexOptController:
 
     def __call__(self, t, current_state, target_state, T_orb):
         """Solve convex relaxation for optimal switching sequence."""
-        e_y = current_state[2] - target_state[2]
+        e_y = current_state[1] - target_state[1]
         secular_gain = 3*self.kappa / ((1+2*self.c) * self.n**2)
 
         N = self.horizon
@@ -102,7 +102,7 @@ class ConstraintTighteningController:
 
     def __call__(self, t, current_state, target_state, T_orb):
         """Apply constraint-tightened control."""
-        e_y = current_state[2] - target_state[2]
+        e_y = current_state[1] - target_state[1]
         secular_gain = 3*self.kappa / ((1+2*self.c) * self.n**2)
 
         # Tighten constraint: require error < target - margin
@@ -131,7 +131,7 @@ class ActiveThrusterController:
 
     def __call__(self, t, current_state, target_state, T_orb, dt=1.0):
         """Apply exact correction thrust."""
-        e_y = current_state[2] - target_state[2]
+        e_y = current_state[1] - target_state[1]
         secular_gain = 3*self.kappa / ((1+2*self.c) * self.n**2)
 
         dfy_req = e_y / (secular_gain * T_orb) if abs(secular_gain * T_orb) > 1e-30 else 0.0

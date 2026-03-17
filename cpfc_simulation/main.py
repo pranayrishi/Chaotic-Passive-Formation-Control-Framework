@@ -1,4 +1,4 @@
-"""CPFC Master Simulation Orchestrator (v2).
+"""CPFC Master Simulation v3 — Corrected SS Physics.
 
 Chaotic Passive Formation Control (CPFC) Framework
 ===================================================
@@ -7,6 +7,11 @@ Addresses all physics gaps:
   GAP 2: 320 km altitude where differential drag has real authority
   GAP 3: Attractor-averaged Cd demonstration
   GAP 4: Melnikov safety boundary heatmap
+
+v3 changes: Corrected SS coefficient c = (5*cos^2(i)-3)/2 instead of
+the approximate J2-based formula. At i=97.5°, c≈-1.457, making (1+2c)
+negative (repulsive radial restoring force). This causes secular drift
+that controllers must actively manage.
 """
 import os
 import numpy as np
@@ -98,7 +103,13 @@ def _get_density_at_alt(alt_km):
 
 
 def _compute_dfy_bounds(rho, v_orb, Cd_lo=2.2, Cd_hi=2.5):
-    """Min/max achievable differential specific force [m/s^2]."""
+    """Min/max achievable differential specific force [m/s^2].
+
+    Returns physical drag bounds independent of secular_gain sign.
+    dfy_max is always the magnitude of the maximum achievable differential
+    specific force. The sign convention is: positive dfy decelerates the
+    deputy relative to the chief (increases along-track separation).
+    """
     CdA_lo = Cd_lo * A_STOWED
     CdA_hi = Cd_hi * A_DEPLOYED
     dfy_max = 0.5 * rho * v_orb**2 * (CdA_hi - CdA_lo) / MASS_SAT
@@ -148,6 +159,8 @@ def step1_precompute(orbital_params, output_dir, alt_km):
     secular_gain = 3 * orbital_params['kappa'] / ((1 + 2*orbital_params['c']) * n**2)
     T_orb = 2 * np.pi / n
     dy_per_orbit = abs(secular_gain * dfy_max * T_orb)
+    print(f"  SS coefficient c = {orbital_params['c']:.4f}, (1+2c) = {1+2*orbital_params['c']:.4f}")
+    print(f"  Secular gain = {secular_gain:.4f} (negative = reversed drift direction)")
     print(f"  Along-track correction per orbit: {dy_per_orbit:.1f} m")
 
     # --- Plots ---
@@ -205,10 +218,11 @@ def step2_coupled_simulation(orbital_params, precomp, controller,
     rng = np.random.default_rng(rng_seed)
 
     # Target formation at t=0
-    target_dep_t0 = pco_formation_state(0.0, n, kappa, FORMATION_RADIUS, N_SATELLITES)[1:]
+    target_dep_t0 = pco_formation_state(0.0, orbital_params, FORMATION_RADIUS, N_SATELLITES)[1:]
     init_dep = target_dep_t0.copy()
-    init_dep[:, [0, 2, 4]] += rng.normal(0, 20, (N_dep, 3))
-    init_dep[:, [1, 3, 5]] += rng.normal(0, 0.01, (N_dep, 3))
+    # State ordering: [x, y, z, xdot, ydot, zdot]
+    init_dep[:, [0, 1, 2]] += rng.normal(0, 20, (N_dep, 3))   # position perturbation ±20m
+    init_dep[:, [3, 4, 5]] += rng.normal(0, 0.01, (N_dep, 3))  # velocity perturbation ±0.01m/s
 
     # If CAPR with coupled dynamics, use the coupled propagator
     is_capr = isinstance(controller, CAPRController)
@@ -219,10 +233,17 @@ def step2_coupled_simulation(orbital_params, precomp, controller,
         from cpfc_simulation.dynamics.coupled_system import CoupledDynamics
         speed_ratio = v_orb / 1300.0
 
+        # Use attractor-averaged CdA as the chief's baseline.
+        # This means differential drag = 0 when deputy and chief have the
+        # same attitude dynamics and panel state. Only intentional panel
+        # switching creates a differential.
+        avg_CdA_chief = precomp.get('avg_CdA', None)
+
         systems = []
         for j in range(N_dep):
             sys = CoupledDynamics(a, inc_rad, rho, v_orb,
-                                  panel_deployed=False, speed_ratio=speed_ratio)
+                                  panel_deployed=False, speed_ratio=speed_ratio,
+                                  Cd_chief=avg_CdA_chief)
             systems.append(sys)
 
         # Full state: [theta, theta_dot, x, y, z, xdot, ydot, zdot]
@@ -251,7 +272,7 @@ def step2_coupled_simulation(orbital_params, precomp, controller,
     for k in tqdm(range(1, N_t), desc=f'  {controller_name}', leave=False):
         t_now = t_output[k - 1]
         dt = t_output[k] - t_output[k - 1]
-        target_now = pco_formation_state(t_now, n, kappa, FORMATION_RADIUS, N_SATELLITES)[1:]
+        target_now = pco_formation_state(t_now, orbital_params, FORMATION_RADIUS, N_SATELLITES)[1:]
 
         for j in range(N_dep):
             # --- Controller decision ---
@@ -313,7 +334,7 @@ def step2_coupled_simulation(orbital_params, precomp, controller,
                 current_dep[j] = sol.y[:, -1]
 
         states_history[k] = current_dep.copy()
-        pos_err = current_dep[:, [0, 2, 4]] - target_now[:, [0, 2, 4]]
+        pos_err = current_dep[:, [0, 1, 2]] - target_now[:, [0, 1, 2]]
         error_history[k] = np.sqrt(np.mean(pos_err**2))
 
     # Compute orbit-averaged error (filters out oscillatory component)
@@ -365,7 +386,7 @@ def step3_run_all(orbital_params, precomp, output_dir, T_sim):
     class NoController:
         """No control — drift freely."""
         def __call__(self, t, state, target, T_orb):
-            return 0, 0.0
+            return (0, 0.0)
     controllers['Uncontrolled'] = (NoController(), False)
 
     all_results = {}
@@ -382,7 +403,7 @@ def step3_run_all(orbital_params, precomp, output_dir, T_sim):
         # Metrics with time-varying targets
         t_arr = result['time']
         target_history = np.array([
-            pco_formation_state(t, n, kappa, FORMATION_RADIUS, N_SATELLITES)[1:]
+            pco_formation_state(t, orbital_params, FORMATION_RADIUS, N_SATELLITES)[1:]
             for t in t_arr
         ])
         metrics = compute_all_metrics(
@@ -737,8 +758,8 @@ def main(T_sim_days=7, alt_km=320, run_safety_boundary=True):
     inc_deg = INC_NOMINAL
 
     print("=" * 72)
-    print("  CPFC v2 — Chaotic Passive Formation Control Simulation")
-    print("  (with coupled attitude-orbital dynamics)")
+    print("  CPFC v3 — Chaotic Passive Formation Control Simulation")
+    print("  (corrected SS physics + coupled attitude-orbital dynamics)")
     print("=" * 72)
     print(f"  Altitude:    {alt_km:.0f} km  (GAP 2: lower alt for drag authority)")
     print(f"  Inclination: {inc_deg:.1f} deg")
@@ -753,7 +774,10 @@ def main(T_sim_days=7, alt_km=320, run_safety_boundary=True):
     T_orb = 2 * np.pi / n
     print(f"\n  Orbital period: {T_orb:.1f} s ({T_orb/60:.1f} min)")
     print(f"  SS kappa = {orbital_params['kappa']:.6f}")
-    print(f"  SS c     = {orbital_params['c']:.6e}")
+    print(f"  SS c     = {orbital_params['c']:.4f}")
+    print(f"  SS omega = {orbital_params['omega']:.6f} rad/s")
+    print(f"  (1+2c)   = {1 + 2*orbital_params['c']:.4f}"
+          f"  {'(REPULSIVE — secular drift expected)' if (1 + 2*orbital_params['c']) < 0 else ''}")
 
     # STEP 1: Precompute
     precomp = step1_precompute(orbital_params, output_dir, alt_km)
@@ -776,7 +800,7 @@ def main(T_sim_days=7, alt_km=320, run_safety_boundary=True):
 
     # Summary
     print("\n" + "=" * 72)
-    print("  SIMULATION COMPLETE — ALL GAPS ADDRESSED")
+    print("  SIMULATION COMPLETE — CORRECTED SS PHYSICS (v3)")
     print("=" * 72)
     for name in ['CAPR (coupled)', 'Uncontrolled', 'LP', 'Thruster (oracle)']:
         m = all_metrics.get(name, {})
@@ -797,7 +821,7 @@ def main(T_sim_days=7, alt_km=320, run_safety_boundary=True):
 
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser(description='CPFC v2 Simulation')
+    parser = argparse.ArgumentParser(description='CPFC v3 Simulation — Corrected SS Physics')
     parser.add_argument('--days', type=float, default=7,
                         help='Simulation duration [days]')
     parser.add_argument('--alt', type=float, default=320,

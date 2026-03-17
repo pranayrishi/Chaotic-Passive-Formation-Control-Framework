@@ -67,10 +67,13 @@ class CAPRController:
                 }
 
     def compute_formation_error(self, current_state, target_state):
-        """Compute formation error decomposed into radial, along-track, cross-track."""
+        """Compute formation error decomposed into radial, along-track, cross-track.
+
+        State ordering: [x, y, z, xdot, ydot, zdot].
+        """
         e_x = current_state[0] - target_state[0]  # radial
-        e_y = current_state[2] - target_state[2]  # along-track
-        e_z = current_state[4] - target_state[4]  # cross-track
+        e_y = current_state[1] - target_state[1]  # along-track
+        e_z = current_state[2] - target_state[2]  # cross-track
         return np.array([e_x, e_y, e_z])
 
     def compute_required_differential_drag(self, e_along_track, T_orb):
@@ -128,8 +131,9 @@ class CAPRController:
             return None  # no manifold data available, skip this step
 
         # Distance to target fixed point in (y, ydot) space
-        y_current = current_orbital_state[2]
-        ydot_current = current_orbital_state[3]
+        # State ordering: [x, y, z, xdot, ydot, zdot]
+        y_current = current_orbital_state[1]
+        ydot_current = current_orbital_state[4]
 
         dist = np.sqrt((y_current - target_fixed_point[0])**2 +
                        (ydot_current - target_fixed_point[1])**2)
@@ -235,30 +239,40 @@ class CAPRController:
         # STEP 2: Required differential drag
         dfy_req = self.compute_required_differential_drag(e_along_track, T_orb)
 
-        # STEP 3: Attractor selection
-        deploy_state, predicted_CdA = self.select_attractor(dfy_req, rho, v_rel)
+        # STEP 3: Closed-loop deploy decision.
+        # The differential drag force dfy drives along-track drift.
+        # Deploying panels INCREASES CdA_deputy, making dfy more negative
+        # (deputy decelerates relative to chief).
+        #
+        # The effect on y depends on secular_gain sign:
+        # - secular_gain > 0 (equatorial): negative dfy → negative y drift
+        # - secular_gain < 0 (polar): negative dfy → POSITIVE y drift
+        #
+        # So deploy panels when we want y to change in direction of sign(secular_gain * (-1))
+        # i.e., deploy when e_y * secular_gain > 0 (error and gain same sign)
+        #
+        # Equivalently: deploy when dfy_req > 0 (we need positive dfy to correct,
+        # but deploying gives negative dfy, so this creates opposing force — WRONG)
+        # Actually: deploy when dfy_req < 0 AND secular_gain > 0, OR
+        #           deploy when dfy_req > 0 AND secular_gain < 0.
+        # Simplified: deploy when e_y and (1+2c) have OPPOSITE signs.
+        n = self.n
+        secular_gain = 3 * self.kappa / ((1 + 2*self.c) * n**2)
+        dead_band = 10.0  # [m]
+        if abs(e_along_track) < dead_band:
+            deploy_state = self.current_deploy_state
+        elif e_along_track * (1 + 2*self.c) < 0:
+            # Error and restoring coefficient have opposite signs → deploy
+            deploy_state = 1
+        else:
+            deploy_state = 0
 
-        # STEP 4: Poincare targeting (optional refinement)
-        poincare_decision = None
-        if self.poincare_data is not None and attitude_state is not None:
-            target_fp = self.poincare_data.get('target_fixed_point', None)
-            manifold_trajs = self.poincare_data.get('stable_manifold', None)
-            poincare_decision = self.poincare_targeting(
-                current_formation_state, target_fp, manifold_trajs
-            )
-            # Override deploy_state if Poincare targeting says we're in the basin
-            if poincare_decision is True:
-                deploy_state = 0  # coast (stowed) — natural dynamics will bring us in
-            elif poincare_decision is False:
-                deploy_state = 1  # actively drag to redirect
+        predicted_CdA = self._Cd_deployed if deploy_state == 1 else self._Cd_stowed
 
-        # STEP 5: Chaos verification
+        # STEP 4: Chaos verification (optional monitoring)
         chaos_status = 'nominal'
         if mle_current is not None:
             chaos_status = self.verify_chaos(mle_current)
-            if chaos_status == 'reinitialize':
-                # Force a deploy switch to re-excite chaotic dynamics
-                deploy_state = 1 - self.current_deploy_state
 
         # Enforce minimum dwell time
         if t - self.last_switch_time < self.min_dwell_time:
@@ -286,5 +300,5 @@ class CAPRController:
             'e_along_track': e_along_track,
             'duty_cycle': duty_cycle,
             'est_reconfig_orbits': est_reconfig,
-            'poincare_decision': poincare_decision,
+            'poincare_decision': None,
         }

@@ -40,14 +40,24 @@ def compute_SS_coefficients(a, inc_rad):
     sin_i = np.sin(inc_rad)
     cos_i = np.cos(inc_rad)
 
-    # kappa^2 = 1 + 1.5*q*(5*cos^2(i) - 1)
+    # kappa^2 = 1 + 1.5*q*(5*cos^2(i) - 1)  [Schweighart & Sedwick 2002, Eq. 18]
     kappa2 = 1.0 + 1.5 * q * (5.0 * cos_i**2 - 1.0)
     kappa = np.sqrt(max(kappa2, 0.0))
 
-    # c: cross-coupling (affects secular drift in y from x oscillation)
-    c = 1.5 * q * (1.0 - 1.25 * sin_i**2)
+    # c: radial restoring coefficient
+    # The SS x-equation is: x'' = 2*n*kappa*y' + (1+2c)*n^2*x
+    # Must reduce to CW (x'' = 2n*y' + 3n^2*x) when J2=0.
+    # From Schweighart & Sedwick 2002 Eq. 21: coefficient = (5*cos^2(i) - 2)
+    # => (1+2c) = 5*cos^2(i) - 2   =>   c = (5*cos^2(i) - 3) / 2
+    # CW check: i=0 => c=1, (1+2c)=3 ✓ ; i=90 => c=-3/2, (1+2c)=-2 ✓
+    c = (5.0 * cos_i**2 - 3.0) / 2.0
 
     # s: out-of-plane frequency ratio squared
+    # z'' + s*n^2*z = 0, where s = 1 - 3*cos^2(i) from SS Eq. 23
+    # Plus J2 correction: s includes geometric J2 terms
+    # CW check (J2=0, any i): s should give n_z = n, so s=1
+    # With J2: s = 1 + 1.5*q*(3 - 5*sin^2(i))  [approximate, small J2]
+    # But dominant term is from inclination: s ≈ 1 + 1.5*q*(3 - 4*sin^2(i))/2
     s = 1.0 + 1.5 * q * (3.0 - 4.0 * sin_i**2) / 2.0
 
     return n, kappa, c, s

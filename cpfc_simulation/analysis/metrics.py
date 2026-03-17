@@ -11,7 +11,7 @@ def formation_rms_error(positions_rel, targets_rel):
     if targets_rel.ndim == 2:
         targets_rel = np.broadcast_to(targets_rel, positions_rel.shape)
 
-    pos_err = positions_rel[:, :, [0,2,4]] - targets_rel[:, :, [0,2,4]]
+    pos_err = positions_rel[:, :, [0,1,2]] - targets_rel[:, :, [0,1,2]]
     rms_per_step = np.sqrt(np.mean(pos_err**2, axis=(1,2)))
     rms_total = np.sqrt(np.mean(pos_err**2))
     return {
@@ -44,7 +44,7 @@ def formation_lifetime(positions_rel, targets_rel, threshold_m=1000.0):
     if targets_rel.ndim == 2:
         targets_rel = np.broadcast_to(targets_rel, positions_rel.shape)
 
-    pos_err = positions_rel[:, :, [0,2,4]] - targets_rel[:, :, [0,2,4]]
+    pos_err = positions_rel[:, :, [0,1,2]] - targets_rel[:, :, [0,1,2]]
     dist_err = np.sqrt(np.sum(pos_err**2, axis=2))  # (N_timesteps, N_sats)
     max_err_per_step = np.max(dist_err, axis=1)
 
