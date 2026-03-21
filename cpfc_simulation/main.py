@@ -190,9 +190,10 @@ def step1_precompute(orbital_params, output_dir, alt_km):
 #  STEP 2 — COUPLED FORMATION SIMULATION (GAP 1: closed attitude-orbital loop)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def step2_coupled_simulation(orbital_params, precomp, controller,
-                              controller_name, T_sim, dt_output=60.0,
-                              use_coupled=True, rng_seed=12345):
+def step2_coupled_simulation(orbital_params, precomp, controller, controller_name,
+                              T_sim, dt_output=60.0,
+                              use_coupled=True, rng_seed=12345,
+                              formation_radius=FORMATION_RADIUS):
     """Run formation simulation with full coupled dynamics.
 
     GAP 1 FIX: For the CAPR controller, attitude dynamics drive Cd via Sentman
@@ -218,7 +219,7 @@ def step2_coupled_simulation(orbital_params, precomp, controller,
     rng = np.random.default_rng(rng_seed)
 
     # Target formation at t=0
-    target_dep_t0 = pco_formation_state(0.0, orbital_params, FORMATION_RADIUS, N_SATELLITES)[1:]
+    target_dep_t0 = pco_formation_state(0.0, orbital_params, formation_radius, N_SATELLITES)[1:]
     init_dep = target_dep_t0.copy()
     # State ordering: [x, y, z, xdot, ydot, zdot]
     init_dep[:, [0, 1, 2]] += rng.normal(0, 20, (N_dep, 3))   # position perturbation ±20m
@@ -246,12 +247,15 @@ def step2_coupled_simulation(orbital_params, precomp, controller,
                                   Cd_chief=avg_CdA_chief)
             systems.append(sys)
 
-        # Full state: [theta, theta_dot, x, y, z, xdot, ydot, zdot]
-        states_full = np.zeros((N_t, N_dep, 8))
+        # Full state: [theta_dep, theta_dot_dep, theta_chief, theta_dot_chief,
+        #              x, y, z, xdot, ydot, zdot]
+        states_full = np.zeros((N_t, N_dep, 10))
         for j in range(N_dep):
-            states_full[0, j, 0] = rng.uniform(-0.3, 0.3)   # theta
-            states_full[0, j, 1] = rng.uniform(-0.005, 0.005)  # theta_dot
-            states_full[0, j, 2:8] = init_dep[j]  # orbital state
+            states_full[0, j, 0] = rng.uniform(-0.3, 0.3)   # theta_dep (tumbling)
+            states_full[0, j, 1] = rng.uniform(-0.005, 0.005)  # theta_dot_dep
+            states_full[0, j, 2] = 0.0   # theta_chief = 0 (gravity-gradient stabilized)
+            states_full[0, j, 3] = 0.0   # theta_dot_chief = 0
+            states_full[0, j, 4:10] = init_dep[j]  # orbital state
     else:
         states_full = None
 
@@ -272,7 +276,7 @@ def step2_coupled_simulation(orbital_params, precomp, controller,
     for k in tqdm(range(1, N_t), desc=f'  {controller_name}', leave=False):
         t_now = t_output[k - 1]
         dt = t_output[k] - t_output[k - 1]
-        target_now = pco_formation_state(t_now, orbital_params, FORMATION_RADIUS, N_SATELLITES)[1:]
+        target_now = pco_formation_state(t_now, orbital_params, formation_radius, N_SATELLITES)[1:]
 
         for j in range(N_dep):
             # --- Controller decision ---
@@ -303,14 +307,15 @@ def step2_coupled_simulation(orbital_params, precomp, controller,
                 else:
                     states_full[k, j] = state_j_full
 
-                # Extract orbital state
-                current_dep[j] = states_full[k, j, 2:8]
-                theta_history[k, j] = states_full[k, j, 0]
+                # Extract orbital state (indices shifted: [4:10] for new 10-elem state)
+                current_dep[j] = states_full[k, j, 4:10]
+                theta_history[k, j] = states_full[k, j, 0]  # deputy theta
 
                 # Record actual CdA and dfy from coupled dynamics
-                theta_now = states_full[k, j, 0]
-                _, _, CdA = systems[j].compute_Cd_from_attitude(theta_now)
-                dfy, _ = systems[j].compute_differential_drag(theta_now)
+                theta_dep_now = states_full[k, j, 0]
+                theta_chief_now = states_full[k, j, 2]
+                _, _, CdA = systems[j].compute_Cd_from_attitude(theta_dep_now)
+                dfy, _ = systems[j].compute_differential_drag(theta_dep_now, theta_chief_now)
                 CdA_history[k, j] = CdA
                 dfy_history[k, j] = dfy
             else:
@@ -365,7 +370,8 @@ def step2_coupled_simulation(orbital_params, precomp, controller,
 #  STEP 3 — RUN ALL CONTROLLERS + UNCONTROLLED BASELINE (GAP: add no-control)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def step3_run_all(orbital_params, precomp, output_dir, T_sim):
+def step3_run_all(orbital_params, precomp, output_dir, T_sim,
+                  formation_radius=FORMATION_RADIUS):
     """Run CAPR + benchmarks + uncontrolled baseline."""
     n = orbital_params['n']
     kappa = orbital_params['kappa']
@@ -382,12 +388,33 @@ def step3_run_all(orbital_params, precomp, output_dir, T_sim):
         'Thruster (oracle)': (ActiveThrusterController(n, kappa, c), False),
     }
 
-    # Add "Uncontrolled" — propagate with zero differential drag
+    # Add "Uncontrolled" — propagate with zero differential drag (decoupled)
     class NoController:
         """No control — drift freely."""
         def __call__(self, t, state, target, T_orb):
             return (0, 0.0)
     controllers['Uncontrolled'] = (NoController(), False)
+
+    # Add "No-ctrl (coupled)" — same 6-DOF tumbling as CAPR but NO switching
+    # This isolates attitude-noise from controller switching for fair comparison
+    class NoControlCAPR(CAPRController):
+        """CAPR dynamics (coupled tumbling) but always stowed — no switching."""
+        def __call__(self, t, current_formation_state, target_formation_state,
+                     attitude_state=None, rho=1e-12, v_rel=7500.0,
+                     mle_current=None, T_orb=5600.0):
+            error = self.compute_formation_error(current_formation_state, target_formation_state)
+            return {
+                'deploy_command': 0,  # always stowed
+                'predicted_CdA': self._Cd_stowed,
+                'formation_error': error,
+                'dfy_required': 0.0,
+                'chaos_status': 'nominal',
+                'e_along_track': error[1],
+                'duty_cycle': 0.0,
+                'est_reconfig_orbits': np.inf,
+                'poincare_decision': None,
+            }
+    controllers['No-ctrl (coupled)'] = (NoControlCAPR(orbital_params), True)
 
     all_results = {}
     all_metrics = {}
@@ -397,13 +424,14 @@ def step3_run_all(orbital_params, precomp, output_dir, T_sim):
         result = step2_coupled_simulation(
             orbital_params, precomp, ctrl, name, T_sim,
             dt_output=dt_output, use_coupled=use_coupled,
+            formation_radius=formation_radius,
         )
         all_results[name] = result
 
         # Metrics with time-varying targets
         t_arr = result['time']
         target_history = np.array([
-            pco_formation_state(t, orbital_params, FORMATION_RADIUS, N_SATELLITES)[1:]
+            pco_formation_state(t, orbital_params, formation_radius, N_SATELLITES)[1:]
             for t in t_arr
         ])
         metrics = compute_all_metrics(
@@ -738,7 +766,8 @@ def step6_figures(all_results, all_metrics, orbital_params, precomp, output_dir)
 #  MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def main(T_sim_days=7, alt_km=320, run_safety_boundary=True):
+def main(T_sim_days=7, alt_km=320, inc_deg=None, formation_radius=None,
+         run_safety_boundary=True):
     """Run the complete CPFC simulation pipeline.
 
     Parameters
@@ -747,15 +776,26 @@ def main(T_sim_days=7, alt_km=320, run_safety_boundary=True):
         Simulation duration in days.
     alt_km : float
         Altitude in km. Default 320 km for strong differential drag authority.
+    inc_deg : float or None
+        Inclination in degrees. If None, uses INC_NOMINAL from config.
+    formation_radius : float or None
+        Formation radius in meters. If None, uses FORMATION_RADIUS from config.
     run_safety_boundary : bool
         If True, compute the Melnikov safety boundary map.
     """
     T_sim = T_sim_days * 86400.0
-    output_dir = os.path.join(os.path.dirname(__file__), '..', 'results')
+
+    if inc_deg is None:
+        inc_deg = INC_NOMINAL
+    if formation_radius is None:
+        formation_radius = FORMATION_RADIUS
+
+    # Separate output dir per inclination for parallel runs
+    output_dir = os.path.join(os.path.dirname(__file__), '..', 'results',
+                              f'inc_{inc_deg:.1f}_r_{formation_radius:.0f}')
     os.makedirs(output_dir, exist_ok=True)
 
     a = R_EARTH + alt_km * 1e3
-    inc_deg = INC_NOMINAL
 
     print("=" * 72)
     print("  CPFC v3 — Chaotic Passive Formation Control Simulation")
@@ -763,7 +803,7 @@ def main(T_sim_days=7, alt_km=320, run_safety_boundary=True):
     print("=" * 72)
     print(f"  Altitude:    {alt_km:.0f} km  (GAP 2: lower alt for drag authority)")
     print(f"  Inclination: {inc_deg:.1f} deg")
-    print(f"  Formation:   {N_SATELLITES} sats, {FORMATION_RADIUS:.0f} m PCO radius")
+    print(f"  Formation:   {N_SATELLITES} sats, {formation_radius:.0f} m PCO radius")
     print(f"  Duration:    {T_sim_days:.1f} days")
     print(f"  Output:      {os.path.abspath(output_dir)}")
     print("=" * 72)
@@ -786,6 +826,7 @@ def main(T_sim_days=7, alt_km=320, run_safety_boundary=True):
     print("\n[STEP 2-3] Running formation simulations ...")
     all_results, all_metrics = step3_run_all(
         orbital_params, precomp, output_dir, T_sim,
+        formation_radius=formation_radius,
     )
 
     # STEP 4: Attractor Cd demonstration (GAP 3)
@@ -826,6 +867,10 @@ if __name__ == '__main__':
                         help='Simulation duration [days]')
     parser.add_argument('--alt', type=float, default=320,
                         help='Altitude [km] (default 320 for strong drag)')
+    parser.add_argument('--inc', type=float, default=None,
+                        help='Inclination [deg] (default: from config.py)')
+    parser.add_argument('--radius', type=float, default=None,
+                        help='Formation radius [m] (default: from config.py)')
     parser.add_argument('--no-safety-boundary', action='store_true',
                         help='Skip safety boundary computation')
     args = parser.parse_args()
@@ -833,5 +878,7 @@ if __name__ == '__main__':
     main(
         T_sim_days=args.days,
         alt_km=args.alt,
+        inc_deg=args.inc,
+        formation_radius=args.radius,
         run_safety_boundary=not args.no_safety_boundary,
     )

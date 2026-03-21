@@ -1,7 +1,9 @@
 """Gravitational and non-gravitational perturbation accelerations.
 
 Implements J2/J3/J4 zonal harmonics, free-molecular drag, SRP with shadow,
-and NRLMSISE-00 atmospheric density.
+NRLMSISE-00 atmospheric density, USSA76 fallback atmosphere, density
+uncertainty modeling (Vallado & Finkleman 2014), and beta angle / eclipse
+fraction computation (Morsch Filho et al. 2020).
 """
 import numpy as np
 from scipy.special import erf
@@ -365,3 +367,220 @@ def get_atmospheric_density(r_eci, epoch_dt, t_since_epoch=0.0, F107=None, Ap=No
     rho = rho_g_cm3 * 1e3  # g/cm^3 -> kg/m^3
 
     return rho
+
+
+# ---------------------------------------------------------------------------
+# Density uncertainty model (Vallado & Finkleman 2014, Acta Astro. 95:141)
+# ---------------------------------------------------------------------------
+
+# Fractional uncertainty levels (from S-Net config / Vallado 2014)
+DENSITY_UNCERT_LONGTERM  = 0.15   # 15%  long-term mean bias
+DENSITY_UNCERT_SHORTTERM = 1.00   # 100% short-term worst-case
+DENSITY_UNCERT_LEVELS    = [-1.00, -0.15, 0.00, +0.15, +1.00]
+
+
+def apply_density_uncertainty(rho_nominal, uncertainty_fraction):
+    """Apply density uncertainty to nominal NRLMSISE-00 / USSA76 value.
+
+    Follows Vallado & Finkleman (2014): rho_actual = rho_nominal * (1 + frac).
+
+    Parameters
+    ----------
+    rho_nominal : float
+        Nominal density from atmospheric model [kg/m^3].
+    uncertainty_fraction : float
+        Fractional deviation, e.g. -0.15 (15% lower), 0.0 (nominal),
+        +1.0 (100% higher).
+
+    Returns
+    -------
+    float
+        Adjusted density [kg/m^3].
+    """
+    return rho_nominal * (1.0 + uncertainty_fraction)
+
+
+# ---------------------------------------------------------------------------
+# USSA76 piecewise-exponential fallback atmosphere
+# (Morsch Filho et al. 2020, Curtis 2014 Table A.1)
+# ---------------------------------------------------------------------------
+
+_USSA76_TABLE = [
+    (  0,    1.225,        7.249),
+    ( 25,    3.899e-2,     6.349),
+    ( 30,    1.774e-2,     6.682),
+    ( 40,    3.972e-3,     7.554),
+    ( 50,    1.057e-3,     8.382),
+    ( 60,    3.206e-4,     7.714),
+    ( 70,    8.770e-5,     6.549),
+    ( 80,    1.905e-5,     5.799),
+    ( 90,    3.396e-6,     5.382),
+    (100,    5.297e-7,     5.877),
+    (110,    9.661e-8,     7.263),
+    (120,    2.438e-8,     9.473),
+    (130,    8.484e-9,    12.636),
+    (140,    3.845e-9,    16.149),
+    (150,    2.070e-9,    22.523),
+    (180,    5.464e-10,   29.740),
+    (200,    2.789e-10,   37.105),
+    (250,    7.248e-11,   45.546),
+    (300,    2.418e-11,   53.628),
+    (350,    9.158e-12,   53.298),
+    (400,    3.725e-12,   58.515),
+    (450,    1.585e-12,   60.828),
+    (500,    6.967e-13,   63.822),
+    (600,    1.454e-13,   71.835),
+    (700,    3.614e-14,   88.667),
+    (800,    1.170e-14,  124.64),
+    (900,    5.245e-15,  181.05),
+    (1000,   3.019e-15,  268.00),
+]
+
+# Scale factor to approximate solar-minimum NRLMSISE-00 from USSA76
+_NRLMSISE_SCALE = 0.55
+
+
+def atmospheric_density_ussa76(alt_km, model='USSA76'):
+    """Return atmospheric density [kg/m^3] from US Standard Atmosphere 1976.
+
+    Piecewise-exponential model from Curtis (2014) Table A.1.
+    Optionally scaled to approximate NRLMSISE-00 at solar minimum.
+
+    Parameters
+    ----------
+    alt_km : float
+        Altitude above Earth surface [km].
+    model : str
+        'USSA76' for raw values, 'NRLMSISE00' to apply scaling factor.
+
+    Returns
+    -------
+    float
+        Density [kg/m^3].
+    """
+    if alt_km < 0:
+        return _USSA76_TABLE[0][1]
+    if alt_km >= 1000:
+        h0, rho0, H = _USSA76_TABLE[-1]
+        rho = rho0 * np.exp(-(alt_km - h0) / H)
+    else:
+        rho = _USSA76_TABLE[0][1]
+        for i in range(len(_USSA76_TABLE) - 1):
+            h0, rho0, H = _USSA76_TABLE[i]
+            h1 = _USSA76_TABLE[i + 1][0]
+            if h0 <= alt_km < h1:
+                rho = rho0 * np.exp(-(alt_km - h0) / H)
+                break
+
+    if model == 'NRLMSISE00':
+        rho *= _NRLMSISE_SCALE
+    return rho
+
+
+def get_atmospheric_density_with_fallback(r_eci, epoch_dt, t_since_epoch=0.0,
+                                          F107=None, Ap=None):
+    """Get atmospheric density, falling back to USSA76 if NRLMSISE-00 unavailable.
+
+    Parameters
+    ----------
+    r_eci : ndarray, shape (3,)
+        ECI position [m].
+    epoch_dt : datetime
+        Mission epoch (UTC).
+    t_since_epoch : float
+        Seconds since epoch.
+    F107, Ap : float or None
+        Solar/geomagnetic indices.
+
+    Returns
+    -------
+    rho : float
+        Atmospheric density [kg/m^3].
+    source : str
+        'NRLMSISE00' or 'USSA76'.
+    """
+    try:
+        rho = get_atmospheric_density(r_eci, epoch_dt, t_since_epoch, F107, Ap)
+        return rho, 'NRLMSISE00'
+    except (ImportError, Exception):
+        # Fall back to USSA76
+        current_time = epoch_dt + timedelta(seconds=t_since_epoch)
+        _, _, alt_km = _eci_to_geodetic(r_eci, current_time)
+        alt_km = max(alt_km, 0.0)
+        rho = atmospheric_density_ussa76(alt_km)
+        return rho, 'USSA76'
+
+
+# ---------------------------------------------------------------------------
+# Beta angle and eclipse fraction (Morsch Filho et al. 2020, Eqs. 39-41)
+# ---------------------------------------------------------------------------
+
+def beta_angle(inc_rad, raan_rad, ecliptic_longitude_rad,
+               obliquity_rad=np.radians(23.4393)):
+    """Compute orbit beta angle (angle between orbit plane and Sun vector).
+
+    Equation 39 of Morsch Filho et al. (2020).
+
+    Parameters
+    ----------
+    inc_rad : float
+        Orbital inclination [rad].
+    raan_rad : float
+        Right ascension of ascending node [rad].
+    ecliptic_longitude_rad : float
+        Sun ecliptic longitude [rad].
+    obliquity_rad : float
+        Earth's obliquity [rad].
+
+    Returns
+    -------
+    float
+        Beta angle [deg].
+    """
+    lam = ecliptic_longitude_rad
+    eps = obliquity_rad
+    i = inc_rad
+    Omega = raan_rad
+
+    beta = np.arcsin(
+        np.cos(lam) * np.sin(Omega) * np.sin(i)
+        - np.sin(lam) * np.cos(eps) * np.cos(Omega) * np.sin(i)
+        + np.sin(lam) * np.sin(eps) * np.cos(i)
+    )
+    return np.degrees(beta)
+
+
+def eclipse_fraction(beta_deg, alt_km):
+    """Compute analytical eclipse fraction of an orbit.
+
+    Equations 40-41 of Morsch Filho et al. (2020).
+
+    Parameters
+    ----------
+    beta_deg : float
+        Beta angle [deg].
+    alt_km : float
+        Orbital altitude [km].
+
+    Returns
+    -------
+    float
+        Eclipse fraction [0, 1].
+    """
+    r = R_EARTH / 1000.0 + alt_km  # [km]
+    RE_km = R_EARTH / 1000.0
+
+    # Eq. 41: critical beta angle
+    beta_star_deg = np.degrees(np.arcsin(RE_km / r))
+
+    if abs(beta_deg) >= beta_star_deg:
+        return 0.0  # no eclipse
+
+    # Eq. 40
+    beta_r = np.radians(beta_deg)
+    numer = np.sqrt((r - RE_km)**2 + 2 * RE_km * (r - RE_km))
+    denom = r * np.cos(beta_r)
+    if denom <= 0:
+        return 0.0
+    fE = (1.0 / 180.0) * np.degrees(np.arccos(np.clip(numer / denom, -1, 1)))
+    return np.clip(fE, 0.0, 1.0)

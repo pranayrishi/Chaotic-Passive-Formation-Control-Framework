@@ -32,7 +32,7 @@ class CAPRController:
         self.current_deploy_state = 0  # 0=stowed, 1=deployed
         self.switch_log = []
         self.last_switch_time = -np.inf
-        self.min_dwell_time = 30.0  # [s] minimum time between switches
+        self.min_dwell_time = 2.0 * np.pi / self.n  # [s] 1 orbital period for attractor settling
 
         # Precomputed lookup: Cd_eff as function of switching frequency
         self._Cd_lookup = None
@@ -258,7 +258,7 @@ class CAPRController:
         # Simplified: deploy when e_y and (1+2c) have OPPOSITE signs.
         n = self.n
         secular_gain = 3 * self.kappa / ((1 + 2*self.c) * n**2)
-        dead_band = 10.0  # [m]
+        dead_band = FORMATION_RADIUS  # [m] scale dead band to formation size
         if abs(e_along_track) < dead_band:
             deploy_state = self.current_deploy_state
         elif e_along_track * (1 + 2*self.c) < 0:

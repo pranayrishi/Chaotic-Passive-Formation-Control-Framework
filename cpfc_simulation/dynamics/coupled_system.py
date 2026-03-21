@@ -75,6 +75,12 @@ class CoupledDynamics:
             self.CdA_chief = Cd_freemolecular(1e-6, speed_ratio, 300.0, T_exo) * A_chief
         self.A_chief = A_chief
 
+        # Atmospheric co-rotation correction (from astro21-sim):
+        # v_rel = v_orbital - omega_earth × r ≈ v_orb - omega*r*cos(i)
+        # At 320 km, omega*r ~ 487 m/s, so this reduces drag by ~12%.
+        self.v_rel = np.sqrt(v_orb**2 + (OMEGA_EARTH * a)**2
+                             - 2.0 * v_orb * OMEGA_EARTH * a * np.cos(inc_rad))
+
         # Gravity gradient parameter
         self.gg_coeff = 3.0 * self.n**2 * (IXX - IZZ) / IYY
 
@@ -94,15 +100,31 @@ class CoupledDynamics:
         )
         return Cd, A_eff, CdA
 
-    def compute_differential_drag(self, theta):
+    def compute_chief_CdA(self, theta_chief):
+        """Compute chief's instantaneous CdA from its pitch angle (always stowed)."""
+        alpha = theta_chief
+        Cd, A_eff, CdA = self.aero_model.effective_drag(
+            alpha, self.speed_ratio, panel_deployed=False  # chief always stowed
+        )
+        return CdA
+
+    def compute_differential_drag(self, theta_dep, theta_chief=None):
         """Compute differential specific force dfy from attitude-driven Cd.
 
         dfy = -0.5 * rho * v^2 * (CdA_deputy - CdA_chief) / mass
 
         This is THE coupling: attitude -> drag -> orbit.
+
+        When theta_chief is provided, the chief's CdA is computed from
+        its own tumbling angle (fair comparison). Otherwise falls back
+        to the constant CdA_chief.
         """
-        _, _, CdA_deputy = self.compute_Cd_from_attitude(theta)
-        dfy = -0.5 * self.rho * self.v_orb**2 * (CdA_deputy - self.CdA_chief) / MASS_SAT
+        _, _, CdA_deputy = self.compute_Cd_from_attitude(theta_dep)
+        if theta_chief is not None:
+            CdA_chief = self.compute_chief_CdA(theta_chief)
+        else:
+            CdA_chief = self.CdA_chief
+        dfy = -0.5 * self.rho * self.v_rel**2 * (CdA_deputy - CdA_chief) / MASS_SAT
         return dfy, CdA_deputy
 
     def compute_aero_torque(self, theta):
@@ -111,46 +133,61 @@ class CoupledDynamics:
         This closes the loop: orbit conditions -> torque -> attitude.
         """
         return self.aero_model.aero_torque(
-            theta, self.rho, self.v_orb, self.speed_ratio, self.panel_deployed
+            theta, self.rho, self.v_rel, self.speed_ratio, self.panel_deployed
+        )
+
+    def compute_chief_aero_torque(self, theta_chief):
+        """Compute chief's aerodynamic pitch torque (always stowed)."""
+        return self.aero_model.aero_torque(
+            theta_chief, self.rho, self.v_rel, self.speed_ratio,
+            panel_deployed=False  # chief always stowed
         )
 
     def eom(self, t, state):
         """Coupled equations of motion.
 
-        State = [theta, theta_dot, x, y, z, xdot, ydot, zdot]
+        State = [theta_dep, theta_dot_dep,
+                 theta_chief, theta_dot_chief,
+                 x, y, z, xdot, ydot, zdot]
 
-        Attitude:
-            theta_ddot = gg_coeff * sin(theta)*cos(theta) + tau_aero/Iyy
+        Deputy attitude:
+            theta_dep_ddot = gg_torque(theta_dep) + aero_torque(theta_dep, panel_state)
+
+        Chief attitude (always stowed, same orbit environment):
+            theta_chief_ddot = gg_torque(theta_chief) + aero_torque(theta_chief, stowed)
 
         Orbital (corrected SS):
             xddot = 2*n*kappa*ydot + (1+2c)*n^2*x + dfx
-            yddot = -2*n*kappa*xdot + dfy(theta)  <-- COUPLED via Cd(theta)
+            yddot = -2*n*kappa*xdot + dfy(theta_dep, theta_chief)  <-- COUPLED
             zddot = -n^2*s*z
         """
-        theta, theta_dot = state[0], state[1]
-        x, y, z = state[2], state[3], state[4]
-        xdot, ydot, zdot = state[5], state[6], state[7]
+        theta_dep, theta_dot_dep = state[0], state[1]
+        theta_chief, theta_dot_chief = state[2], state[3]
+        x, y, z = state[4], state[5], state[6]
+        xdot, ydot, zdot = state[7], state[8], state[9]
 
         n, kappa, c_ss, s_ss = self.n, self.kappa, self.c, self.s
 
-        # --- Attitude dynamics ---
-        # Gravity gradient torque (pitch)
-        tau_gg = self.gg_coeff * np.sin(theta) * np.cos(theta)
+        # --- Deputy attitude dynamics ---
+        tau_gg_dep = self.gg_coeff * np.sin(theta_dep) * np.cos(theta_dep)
+        tau_aero_dep = self.compute_aero_torque(theta_dep) / IYY
+        theta_dep_ddot = tau_gg_dep + tau_aero_dep
 
-        # Aerodynamic torque (depends on theta)
-        tau_aero = self.compute_aero_torque(theta) / IYY
-
-        theta_ddot = tau_gg + tau_aero
+        # --- Chief attitude dynamics (same torques, but always stowed) ---
+        tau_gg_chief = self.gg_coeff * np.sin(theta_chief) * np.cos(theta_chief)
+        tau_aero_chief = self.compute_chief_aero_torque(theta_chief) / IYY
+        theta_chief_ddot = tau_gg_chief + tau_aero_chief
 
         # --- Orbital dynamics (SS with attitude-coupled drag) ---
-        # Differential drag from instantaneous attitude
-        dfy, _ = self.compute_differential_drag(theta)
+        # Differential drag from BOTH instantaneous attitudes
+        dfy, _ = self.compute_differential_drag(theta_dep, theta_chief)
 
         xddot = 2.0 * n * kappa * ydot + (1.0 + 2.0 * c_ss) * n**2 * x
         yddot = -2.0 * n * kappa * xdot + dfy
         zddot = -n**2 * s_ss * z
 
-        return np.array([theta_dot, theta_ddot,
+        return np.array([theta_dot_dep, theta_dep_ddot,
+                         theta_dot_chief, theta_chief_ddot,
                          xdot, ydot, zdot,
                          xddot, yddot, zddot])
 
@@ -159,8 +196,9 @@ class CoupledDynamics:
 
         Parameters
         ----------
-        state0 : ndarray, shape (8,)
-            [theta, theta_dot, x, y, z, xdot, ydot, zdot]
+        state0 : ndarray, shape (10,)
+            [theta_dep, theta_dot_dep, theta_chief, theta_dot_chief,
+             x, y, z, xdot, ydot, zdot]
         t_span : tuple
             (t0, tf)
         t_eval : ndarray or None

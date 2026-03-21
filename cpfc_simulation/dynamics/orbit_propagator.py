@@ -180,3 +180,98 @@ class OrbitPropagator:
         t_end = n_orbits * T_ORBIT
         t_eval = np.linspace(0, t_end, n_orbits * n_points_per_orbit + 1)
         return self.propagate(state0, (0.0, t_end), t_eval=t_eval)
+
+
+# ---------------------------------------------------------------------------
+# Gauss Variational Equations (GVE) propagator
+# (From Morsch Filho et al. 2020, Eqs. 19a-f)
+# ---------------------------------------------------------------------------
+
+def gauss_variational_eqs(coe, pr, ps, pw, mu=MU_EARTH):
+    """Compute time derivatives of classical orbital elements under perturbation.
+
+    Equations 19a-f of Morsch Filho et al. (2020).
+    COE = (h, e, theta, Omega, i, omega) where h = specific angular momentum.
+
+    Parameters
+    ----------
+    coe : dict
+        Orbital elements: 'h' [m^2/s], 'e' [-], 'theta' [rad],
+        'Omega' [rad], 'i' [rad], 'omega' [rad].
+    pr : float
+        Radial perturbation [m/s^2].
+    ps : float
+        Along-track (transverse) perturbation [m/s^2].
+    pw : float
+        Cross-track (normal) perturbation [m/s^2].
+    mu : float
+        Gravitational parameter [m^3/s^2].
+
+    Returns
+    -------
+    dict
+        Time derivatives: dh, de, dtheta, dOmega, di, domega.
+    """
+    h, e, theta = coe['h'], coe['e'], coe['theta']
+    Omega, i, omega = coe['Omega'], coe['i'], coe['omega']
+    r = h**2 / mu / (1.0 + e * np.cos(theta))
+
+    dh     = r * ps                                                         # 19a
+    de     = (h / mu * np.sin(theta) * pr
+              + ps / (mu * h) * ((h**2 + mu * r) * np.cos(theta)
+                                  + mu * e * r))                            # 19b
+    dtheta = (h / r**2
+              + h**2 * np.cos(theta) / (mu * e * h) * pr
+              - (r + h**2 / mu) * np.sin(theta) / (e * h) * ps)            # 19c
+    dOmega = r / (h * np.sin(i)) * np.sin(omega + theta) * pw if abs(np.sin(i)) > 1e-10 else 0.0  # 19d
+    di     = r / h * np.cos(omega + theta) * pw                            # 19e
+    domega = (-(h**2 * np.cos(theta)) / (mu * e * h) * pr
+              + (r + h**2 / mu) * np.sin(theta) / (e * h) * ps
+              - r * np.sin(omega + theta) / (h * np.tan(i)) * pw
+              if abs(np.tan(i)) > 1e-10 else
+              -(h**2 * np.cos(theta)) / (mu * e * h) * pr
+              + (r + h**2 / mu) * np.sin(theta) / (e * h) * ps)            # 19f
+
+    return {'dh': dh, 'de': de, 'dtheta': dtheta,
+            'dOmega': dOmega, 'di': di, 'domega': domega}
+
+
+def propagate_gve(coe0, t_span, perturb_func, t_eval=None, mu=MU_EARTH):
+    """Propagate orbit using Gauss Variational Equations.
+
+    Provides an element-space alternative to Cartesian ECI propagation.
+    Naturally avoids high-frequency oscillations and directly yields
+    orbital elements for drift analysis.
+
+    Parameters
+    ----------
+    coe0 : dict
+        Initial orbital elements: h, e, theta, Omega, i, omega.
+    t_span : tuple (t0, tf)
+        Integration interval [s].
+    perturb_func : callable(coe, t) -> (pr, ps, pw)
+        Function returning perturbation accelerations [m/s^2].
+    t_eval : ndarray or None
+        Output times [s].
+    mu : float
+        Gravitational parameter [m^3/s^2].
+
+    Returns
+    -------
+    sol : OdeResult
+        scipy solve_ivp solution. sol.y rows: [h, e, theta, Omega, i, omega].
+    """
+    keys = ['h', 'e', 'theta', 'Omega', 'i', 'omega']
+    y0 = np.array([coe0[k] for k in keys])
+
+    def rhs(t, y):
+        coe = dict(zip(keys, y))
+        coe['e'] = max(coe['e'], 1e-7)  # clamp eccentricity
+        pr, ps, pw = perturb_func(coe, t)
+        dcoe = gauss_variational_eqs(coe, pr, ps, pw, mu)
+        return np.array([dcoe['d' + k] for k in keys])
+
+    sol = solve_ivp(rhs, t_span, y0, method='RK45',
+                    rtol=1e-10, atol=1e-12, max_step=30.0,
+                    t_eval=t_eval, dense_output=True)
+    return sol

@@ -333,3 +333,179 @@ def validate_SS_solution(orbital_params, tol=1e-6):
     passed = max_err < tol
 
     return max_err, passed
+
+
+# ---------------------------------------------------------------------------
+# Relative Orbital Elements (ROE) and frame conversions
+# (From S-Net / Ben-Yaacov & Gurfil 2013, JGCD 36(6):1731-1740)
+# ---------------------------------------------------------------------------
+
+def cartesian_to_classical_oe(r_vec, v_vec, mu=MU_EARTH):
+    """Convert ECI position/velocity to classical orbital elements.
+
+    Parameters
+    ----------
+    r_vec : ndarray (3,)
+        ECI position [m].
+    v_vec : ndarray (3,)
+        ECI velocity [m/s].
+    mu : float
+        Gravitational parameter [m^3/s^2].
+
+    Returns
+    -------
+    ndarray (6,)
+        [a, e, i, omega, RAAN, M] with a in [m], angles in [rad].
+    """
+    r_vec = np.asarray(r_vec, dtype=float)
+    v_vec = np.asarray(v_vec, dtype=float)
+
+    r = np.linalg.norm(r_vec)
+    v = np.linalg.norm(v_vec)
+    vr = np.dot(r_vec, v_vec) / r
+
+    # Angular momentum
+    h_vec = np.cross(r_vec, v_vec)
+    h = np.linalg.norm(h_vec)
+
+    # Node line
+    K = np.array([0.0, 0.0, 1.0])
+    N_vec = np.cross(K, h_vec)
+    N = np.linalg.norm(N_vec)
+
+    # Eccentricity vector
+    e_vec = ((v**2 - mu / r) * r_vec - r * vr * v_vec) / mu
+    e = np.linalg.norm(e_vec)
+
+    # Orbital elements
+    a = 1.0 / (2.0 / r - v**2 / mu)
+    i = np.arccos(np.clip(h_vec[2] / h, -1.0, 1.0))
+
+    RAAN = np.arccos(np.clip(N_vec[0] / N, -1.0, 1.0)) if N > 1e-10 else 0.0
+    if N_vec[1] < 0.0:
+        RAAN = 2.0 * np.pi - RAAN
+
+    omega = (np.arccos(np.clip(np.dot(N_vec, e_vec) / (N * e), -1.0, 1.0))
+             if N > 1e-10 and e > 1e-10 else 0.0)
+    if e_vec[2] < 0.0:
+        omega = 2.0 * np.pi - omega
+
+    nu = (np.arccos(np.clip(np.dot(e_vec, r_vec) / (e * r), -1.0, 1.0))
+          if e > 1e-10 else 0.0)
+    if vr < 0.0:
+        nu = 2.0 * np.pi - nu
+
+    # True -> eccentric -> mean anomaly
+    E = 2.0 * np.arctan2(np.sqrt(1.0 - e) * np.sin(nu / 2.0),
+                          np.sqrt(1.0 + e) * np.cos(nu / 2.0))
+    M = E - e * np.sin(E)
+    M = M % (2.0 * np.pi)
+
+    return np.array([a, e, i, omega, RAAN, M])
+
+
+def cartesian_to_roe(r_chief, v_chief, r_deputy, v_deputy, mu=MU_EARTH):
+    """Convert absolute ECI states to Relative Orbital Elements.
+
+    Uses the linearised ROE mapping from Ben-Yaacov & Gurfil (2013).
+
+    Parameters
+    ----------
+    r_chief, v_chief : ndarray (3,)
+        Chief ECI state [m, m/s].
+    r_deputy, v_deputy : ndarray (3,)
+        Deputy ECI state [m, m/s].
+    mu : float
+        Gravitational parameter [m^3/s^2].
+
+    Returns
+    -------
+    ndarray (6,)
+        [delta_a, delta_ex, delta_ey, delta_ix, delta_iy, delta_u].
+    """
+    oe_c = cartesian_to_classical_oe(r_chief, v_chief, mu)
+    oe_d = cartesian_to_classical_oe(r_deputy, v_deputy, mu)
+
+    a_c, e_c, i_c, om_c, Ra_c, M_c = oe_c
+    a_d, e_d, i_d, om_d, Ra_d, M_d = oe_d
+
+    delta_a  = (a_d - a_c) / a_c
+    delta_e  = e_d - e_c
+    delta_i  = i_d - i_c
+    delta_Ra = (Ra_d - Ra_c + np.pi) % (2 * np.pi) - np.pi
+    delta_M  = (M_d - M_c + np.pi) % (2 * np.pi) - np.pi
+    delta_om = om_d - om_c
+
+    delta_ex = delta_e * np.cos(om_c) - e_c * delta_Ra * np.sin(om_c)
+    delta_ey = delta_e * np.sin(om_c) + e_c * delta_Ra * np.cos(om_c)
+    delta_ix = delta_i
+    delta_iy = np.sin(i_c) * delta_Ra
+    delta_u  = delta_M + delta_om
+
+    return np.array([delta_a, delta_ex, delta_ey, delta_ix, delta_iy, delta_u])
+
+
+def eci_to_rtn(r_chief, v_chief, r_deputy, v_deputy):
+    """Convert ECI absolute states to RTN relative position and velocity.
+
+    RTN frame centred on the chief:
+      R = radial (outward), T = along-track, N = cross-track.
+
+    Parameters
+    ----------
+    r_chief, v_chief : ndarray (3,)
+        Chief ECI state [m, m/s].
+    r_deputy, v_deputy : ndarray (3,)
+        Deputy ECI state [m, m/s].
+
+    Returns
+    -------
+    rtn_pos : ndarray (3,)
+        [R, T, N] relative position [m].
+    rtn_vel : ndarray (3,)
+        [vR, vT, vN] relative velocity [m/s].
+    """
+    rc = np.asarray(r_chief, dtype=float)
+    vc = np.asarray(v_chief, dtype=float)
+
+    r_rel = np.asarray(r_deputy, dtype=float) - rc
+    v_rel = np.asarray(v_deputy, dtype=float) - vc
+
+    r_hat = rc / np.linalg.norm(rc)
+    h_vec = np.cross(rc, vc)
+    n_hat = h_vec / np.linalg.norm(h_vec)
+    t_hat = np.cross(n_hat, r_hat)
+
+    Q = np.vstack([r_hat, t_hat, n_hat])
+
+    omega_mag = np.linalg.norm(h_vec) / np.linalg.norm(rc)**2
+    omega_vec = n_hat * omega_mag
+
+    rtn_pos = Q @ r_rel
+    rtn_vel = Q @ (v_rel - np.cross(omega_vec, r_rel))
+
+    return rtn_pos, rtn_vel
+
+
+def along_track_drift_rate(delta_a_abs, sma, mu=MU_EARTH):
+    """Compute mean along-track drift rate from SMA difference.
+
+    From D'Amico & Montenbruck (2006):
+      dy_drift/dt = -3/2 * n * delta_a / a
+
+    Parameters
+    ----------
+    delta_a_abs : float
+        Absolute SMA difference a_deputy - a_chief [m].
+    sma : float
+        Chief semi-major axis [m].
+    mu : float
+        Gravitational parameter [m^3/s^2].
+
+    Returns
+    -------
+    float
+        Along-track drift rate [m/s].
+    """
+    n = np.sqrt(mu / sma**3)
+    return -1.5 * n * delta_a_abs / sma

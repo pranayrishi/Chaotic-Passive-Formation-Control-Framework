@@ -198,3 +198,51 @@ class CubeSatAeroModel:
         if CdA < 1e-15:
             return np.inf
         return self.mass / CdA
+
+    def effective_area_with_pointing_error(self, alpha, speed_ratio,
+                                            panel_deployed,
+                                            sigma_pointing_deg=0.0):
+        """Compute effective drag parameters accounting for attitude pointing error.
+
+        Uses a Gaussian decay model from Ingrillini et al. (2025):
+        the differential ballistic coefficient shrinks as pointing
+        accuracy degrades, following delta_BC_eff = delta_BC_0 * exp(-k*sigma^2).
+
+        For a cosine-squared area-projection model with Gaussian pointing
+        uncertainty epsilon ~ N(0, sigma^2):
+            E[A_eff] = A_nominal * 0.5 * (1 + cos(2*theta) * exp(-2*sigma^2))
+
+        Parameters
+        ----------
+        alpha : float
+            Nominal angle of attack [rad].
+        speed_ratio : float
+            Molecular speed ratio.
+        panel_deployed : bool
+            Whether drag panels are deployed.
+        sigma_pointing_deg : float
+            1-sigma attitude pointing error [deg].
+
+        Returns
+        -------
+        Cd_eff : float
+            Effective drag coefficient (unchanged by pointing error).
+        A_eff : float
+            Expected effective cross-sectional area [m^2].
+        CdA : float
+            Product Cd * A [m^2].
+        """
+        if sigma_pointing_deg <= 0.0:
+            return self.effective_drag(alpha, speed_ratio, panel_deployed)
+
+        Cd_eff, A_nominal, _ = self.effective_drag(alpha, speed_ratio,
+                                                    panel_deployed)
+
+        # Gaussian decay of area modulation
+        sigma_rad = np.radians(sigma_pointing_deg)
+        A_eff = A_nominal * 0.5 * (
+            1.0 + np.cos(2.0 * alpha) * np.exp(-2.0 * sigma_rad**2)
+        )
+        A_eff = max(A_eff, 1e-15)
+
+        return Cd_eff, A_eff, Cd_eff * A_eff

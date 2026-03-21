@@ -36,7 +36,7 @@ CR             = 1.3              # solar radiation reflectivity coefficient
 # ─── Formation Mission Parameters ─────────────────────────────────────────────
 N_SATELLITES   = 4
 ALT_NOMINAL    = 450e3            # [m] 450 km LEO
-INC_NOMINAL    = 97.5             # [deg] sun-synchronous
+INC_NOMINAL    = 51.6             # [deg] ISS-like (stable SS: (1+2c) > 0)
 RAAN_NOMINAL   = 0.0              # [deg]
 FORMATION_RADIUS = 500.0          # [m] PCO formation radius
 SEPARATION_TARGET = 500.0         # [m] in-track separation target
