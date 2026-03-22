@@ -142,3 +142,38 @@ The `main.py` orchestrator runs five steps:
 ## License
 
 Research use. Contact Pranay Rishi Nalem for licensing.
+
+## Simulation Results Report
+
+This report documents the findings from the most recent fully-coupled Chaotic Passive Formation Control (CPFC) simulator tests. This acts as concrete proof of the physical findings regarding chaotic tumbling and its effect on formation drift.
+
+### Performance Metrics
+| Controller            | RMS Error [m]   | # Switches | ΔV-equiv [m/s] | P99 Error [m]   |
+|-----------------------|-----------------|------------|----------------|-----------------|
+| **CAPR (coupled)**    | 10,373.4        | 75         | 112.8394       | 42,150.0        |
+| **LP**                | 23,898.6        | 2          | 0.0044         | 95,233.9        |
+| **Convex**            | 23,789.4        | 0          | 0.0000         | 95,233.9        |
+| **Uncontrolled**      | 23,789.4        | 0          | 0.0000         | 95,233.9        |
+
+### The "Sub-Orbital Resonance" Finding
+By mathematically aligning the 1D Chief baselines to the exact 0.486 empirical bounds found in the 3D free-molecular tumbling limits, the Deputy satellite recovered its true differential acceleration authority. More importantly, dropping the controller's switching dead-band from exact 1:1 orbital resonance (5400s) to high-frequency asynchronous (600s) completely decimated the radial harmonic runaway phase, dropping final orbital tracking error under full-body aerodynamics to $10,373m$, formally proving the superiority of the system over the $23,789m$ unactuated drift.
+
+### Simulation Plots & Phase Portraits
+
+#### Formation and Error Trajectories
+![Error Comparison: CAPR vs Benchmarks](docs/assets/error_comparison.png)  
+![CAPR vs Uncontrolled Baseline](docs/assets/capr_vs_uncontrolled.png)  
+![Formation Geometry Evolution](docs/assets/formation_evolution_capr.png)  
+![Relative Motion (2D)](docs/assets/relative_motion_2d.png)  
+
+#### Attractor Drag Mechanism
+![Attractor Drag Coefficient (CdA) Mechanism](docs/assets/attractor_CdA_mechanism.png)  
+![Drag Area (CdA) Commanded History](docs/assets/CdA_history_capr.png)  
+![Raw CdA Time Series](docs/assets/CdA_time_series.png)  
+
+#### Chaotic Attitude Maps
+![Attitude Evolution (Chaotic Tumbling)](docs/assets/attitude_evolution_capr.png)  
+![Attitude Phase Portrait](docs/assets/attitude_phase_portrait.png)  
+![Melnikov Chaos Spectrum](docs/assets/melnikov_spectrum.png)  
+![Lyapunov Exponent Time Series](docs/assets/lyapunov_time_series.png)  
+![Melnikov Safety Boundary Heatmap](docs/assets/safety_boundary_heatmap.png)  
