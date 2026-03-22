@@ -66,7 +66,11 @@ from cpfc_simulation.control.benchmark_controllers import (
 from cpfc_simulation.analysis.metrics import (
     compute_all_metrics, controller_comparison_table,
 )
-
+# [ADDED] Orbital lifetime analysis — connects DuBois et al. (2026) DORA paper
+from cpfc_simulation.analysis.orbital_lifetime import (
+    smad_lifetime_estimate, lifetime_vs_solar_flux,
+    mission_feasibility, feasibility_grid,
+)
 # ── Visualisation ──────────────────────────────────────────────────────────────
 from cpfc_simulation.visualization.phase_portraits import (
     plot_attitude_phase_portrait, plot_poincare_section,
@@ -75,9 +79,11 @@ from cpfc_simulation.visualization.phase_portraits import (
 from cpfc_simulation.visualization.formation_plots import (
     plot_formation_3d, plot_formation_evolution,
     plot_relative_motion_2d, plot_formation_error_history,
+    plot_solar_sensitivity, plot_feasibility_map,       # [ADDED] DuBois et al.
 )
 from cpfc_simulation.visualization.safety_maps import (
     plot_safety_boundary_heatmap, plot_melnikov_spectrum,
+    plot_safety_boundary_with_lifetime,                 # [ADDED] DuBois et al.
 )
 
 import matplotlib
@@ -606,6 +612,89 @@ def step5_safety_boundary(output_dir):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# [ADDED] STEP 5b — ORBITAL LIFETIME & MISSION FEASIBILITY
+# ─────────────────────────────────────────────────────────────────────────────
+# Connects DuBois, Jacobs & Vaidyanathan (2026) "Effect of High Solar Activity
+# on the Orbital Decay Rate of the 3U CubeSat DORA" to the CPFC framework.
+#
+# The DORA paper shows that solar activity reduces CubeSat lifetime by up to
+# 8x (54-day re-entry under Solar Cycle 25 max vs. ~420 days at solar min).
+# This step flips that finding: higher solar activity = more atmospheric
+# density = more differential drag authority for passive formation control.
+#
+# Outputs:
+#   1. solar_sensitivity_tradeoff.png  — dual-axis: lifetime vs. Δf_y,max
+#   2. mission_feasibility_map.png     — altitude × F10.7 heatmap
+#   3. safety_boundary_with_lifetime.png — Melnikov map + lifetime contours
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def step5b_lifetime_analysis(output_dir, alt_km, h5_path=None):
+    """Compute orbital lifetime tradeoff with solar activity.
+
+    Motivated by DuBois, Jacobs & Vaidyanathan (2026) — DORA CubeSat
+    re-entry analysis under Solar Cycle 25 conditions.
+    """
+    print("\n[STEP 5b] Orbital lifetime & feasibility analysis ...")
+
+    # --- 1. Lifetime vs solar flux at mission altitude ---
+    F107_range = np.arange(70, 260, 10)
+    _, lifetimes = lifetime_vs_solar_flux(alt_km, F107_range)
+
+    # Compute differential drag authority at each F10.7
+    dfy_max_arr = np.zeros_like(F107_range, dtype=float)
+    from cpfc_simulation.analysis.orbital_lifetime import _exponential_density
+    for i, f107 in enumerate(F107_range):
+        rho_base = _exponential_density(alt_km)
+        rho = rho_base * (f107 / 150.0) ** 0.7
+        r = R_EARTH + alt_km * 1e3
+        v = np.sqrt(MU_EARTH / r)
+        dfy_max_arr[i] = 0.5 * rho * v**2 * 2.2 * (A_DEPLOYED - A_STOWED) / MASS_SAT
+
+    plot_solar_sensitivity(
+        F107_range, lifetimes, dfy_max_arr, h_km=alt_km,
+        save_path=os.path.join(output_dir, 'solar_sensitivity_tradeoff.png'),
+    )
+    print(f"  Saved solar_sensitivity_tradeoff.png")
+
+    # Print DORA-style comparison
+    feas = mission_feasibility(alt_km, F107_NOMINAL)
+    print(f"  At {alt_km:.0f} km, F10.7={F107_NOMINAL:.0f}: "
+          f"lifetime={feas['lifetime_days']:.0f} d, "
+          f"margin={feas['margin_days']:.0f} d, "
+          f"feasible={feas['feasible']}")
+
+    # DORA comparison point (408 km, ~220 SFU during solar max)
+    dora_feas = mission_feasibility(408, 220, mission_duration_days=54)
+    print(f"  DORA comparison (408 km, F10.7=220): "
+          f"predicted={dora_feas['lifetime_days']:.0f} d "
+          f"(actual=54 d)")
+
+    # --- 2. Feasibility grid: altitude x F10.7 ---
+    h_grid = np.arange(250, 600, 10)
+    f107_grid = np.arange(70, 260, 10)
+    feas_result = feasibility_grid(h_grid, f107_grid, mission_duration_days=30.0)
+
+    plot_feasibility_map(
+        h_grid, f107_grid,
+        feas_result['lifetime_grid'], feas_result['dfy_max_grid'],
+        mission_days=30.0,
+        save_path=os.path.join(output_dir, 'mission_feasibility_map.png'),
+    )
+    print(f"  Saved mission_feasibility_map.png")
+
+    # --- 3. Lifetime overlay on safety boundary (if h5 exists) ---
+    if h5_path is not None and os.path.exists(h5_path):
+        plot_safety_boundary_with_lifetime(
+            h5_path, mission_days=30.0,
+            save_path=os.path.join(output_dir,
+                                    'safety_boundary_with_lifetime.png'),
+        )
+        print(f"  Saved safety_boundary_with_lifetime.png")
+
+    return feas_result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  STEP 6 — PUBLICATION FIGURES
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -792,8 +881,13 @@ def main(T_sim_days=7, alt_km=320, run_safety_boundary=True):
     CdA_demo = step4_attractor_Cd_demo(orbital_params, precomp, output_dir)
 
     # STEP 5: Safety boundary (GAP 4)
+    h5_path = os.path.join(output_dir, 'safety_boundary_map.h5')
     if run_safety_boundary:
         step5_safety_boundary(output_dir)
+
+    # [ADDED] STEP 5b: Orbital lifetime & mission feasibility analysis
+    # Connects DuBois et al. (2026) DORA paper — solar activity tradeoff
+    step5b_lifetime_analysis(output_dir, alt_km, h5_path=h5_path)
 
     # STEP 6: Figures
     step6_figures(all_results, all_metrics, orbital_params, precomp, output_dir)

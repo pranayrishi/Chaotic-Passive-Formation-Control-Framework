@@ -84,7 +84,7 @@ def melnikov_integral(tau_array, omega_h, Omega):
     M = |integral omega_h(tau) * exp(i*Omega*tau) dtau|
     """
     integrand = omega_h * np.exp(1j * Omega * tau_array)
-    M_complex = np.trapz(integrand, tau_array)
+    M_complex = np.trapezoid(integrand, tau_array)
     return np.abs(M_complex)
 
 
