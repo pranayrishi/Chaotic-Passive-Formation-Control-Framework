@@ -1,6 +1,33 @@
 # CPFC: Chaotic Passive Formation Control Framework
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23369472.svg)](https://doi.org/10.5281/zenodo.23369472)
+[![AAS 26-1032](https://img.shields.io/badge/AAS%2026--1032-Poster%20%7C%202026%20Astrodynamics%20Specialist%20Conference-blue)](https://space-flight.org/docs/2026_summer/2026_summer.html)
+
+**Accepted:** Paper AAS 26-1032 was accepted as a **Poster Presentation** at the **2026 AAS/AIAA Astrodynamics Specialist Conference** in Whistler, BC, Canada. The paper is published on Zenodo: https://doi.org/10.5281/zenodo.23369472
+
 A physics-driven simulation framework for propellant-free LEO satellite formation keeping using differential drag, natural orbital perturbations (J2/J3/J4), and chaos-assisted attitude control.
+
+## Publication
+
+The paper describing this work is published on Zenodo: **https://doi.org/10.5281/zenodo.23369472**
+
+> Nalem, P. R., Nori, A., Kundurthi, S., Chowtoori, M., and Sabhnani, P., *Testing Chaos-Assisted Passive Reconfiguration: Relative-Motion Validation, Invariant Maps, and Fair Differential-Drag Comparison*, Zenodo, 2026. doi:10.5281/zenodo.23369472
+
+It was accepted as a Poster Presentation (paper AAS 26-1032) at the 2026 AAS/AIAA Astrodynamics Specialist Conference, Whistler, British Columbia, Canada, July 26–30, 2026.
+
+If you use this framework, please cite:
+
+```bibtex
+@misc{nalem_2026_23369472,
+  author       = {Nalem, Pranay Rishi and Nori, Aditya and Kundurthi, Siddharth and Chowtoori, Megha and Sabhnani, Prisha},
+  title        = {Testing Chaos-Assisted Passive Reconfiguration: Relative-Motion Validation, Invariant Maps, and Fair Differential-Drag Comparison},
+  year         = {2026},
+  publisher    = {Zenodo},
+  note         = {Poster presentation, 2026 AAS/AIAA Astrodynamics Specialist Conference, paper AAS 26-1032},
+  doi          = {10.5281/zenodo.23369472},
+  url          = {https://doi.org/10.5281/zenodo.23369472}
+}
+```
 
 ## Novel Contribution
 
